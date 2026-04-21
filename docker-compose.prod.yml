@@ -118,7 +118,6 @@ services:
     depends_on:
       - sub2api
     ports:
-      - "80:80"
       - "443:443"
       - "443:443/udp"  # HTTP/3 (QUIC)
     volumes:
