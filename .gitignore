@@ -1,0 +1,24 @@
+# env
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# editors
+.vscode/
+.idea/
+*.swp
+
+# node (if we ever lint at root)
+node_modules/
+
+# docker volumes (sub2api compose uses these dir names)
+data/
+postgres_data/
+redis_data/
+
+# build artifacts
+dist/
+*.log

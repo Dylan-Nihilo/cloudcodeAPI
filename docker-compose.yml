@@ -1,0 +1,126 @@
+# proxy-api root orchestration
+# -----------------------------------------------------------------------------
+# Phase 0: postgres + redis + sub2api (prebuilt image, UI is upstream stock).
+# Phase 1+: add cursor2api via docker-compose.override.yml (see *.example.yml).
+# Phase 2+: add caddy via docker-compose.prod.yml (TBD).
+#
+# To switch to building sub2api from source (required for frontend re-skin
+# to be visible), replace the `image:` line on the sub2api service with:
+#     build:
+#       context: ./sub2api
+#       dockerfile: Dockerfile
+# -----------------------------------------------------------------------------
+
+services:
+  sub2api:
+    image: weishaw/sub2api:latest
+    container_name: sub2api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${HOST_PORT:-8080}:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      AUTO_SETUP: "true"
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      SERVER_MODE: ${SERVER_MODE:-release}
+      RUN_MODE: ${RUN_MODE:-standard}
+      TZ: ${TZ:-Asia/Shanghai}
+
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER:-sub2api}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      DATABASE_DBNAME: ${POSTGRES_DB:-sub2api}
+      DATABASE_SSLMODE: disable
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: 0
+
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@sub2api.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env (openssl rand -hex 32)}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:?TOTP_ENCRYPTION_KEY must be set in .env (openssl rand -hex 32)}
+
+      # Antigravity gateway: 'prod' | 'daily'. Prod is the public-stable
+      # endpoint; daily is the internal preview channel.
+      GATEWAY_ANTIGRAVITY_FORWARD_BASE_URL: ${GATEWAY_ANTIGRAVITY_FORWARD_BASE_URL:-prod}
+
+      # sub2api's own proxy setting for fetching GitHub-hosted model pricing.
+      # The HTTP_PROXY env below covers the gateway's general outbound; this
+      # is sub2api's purpose-built knob for pricing/version-check fetches.
+      UPDATE_PROXY_URL: ${OUTBOUND_PROXY:-http://host.docker.internal:7897}
+
+      # Outbound HTTP proxy for the container itself (so calls to Antigravity /
+      # Anthropic / Google reach the public internet via Dylan's local proxy).
+      # NO_PROXY excludes intra-stack hostnames so DB/Redis stay direct.
+      HTTP_PROXY:  ${OUTBOUND_PROXY:-http://host.docker.internal:7897}
+      HTTPS_PROXY: ${OUTBOUND_PROXY:-http://host.docker.internal:7897}
+      ALL_PROXY:   ${OUTBOUND_PROXY:-http://host.docker.internal:7897}
+      NO_PROXY:    localhost,127.0.0.1,postgres,redis,cursor2api
+      http_proxy:  ${OUTBOUND_PROXY:-http://host.docker.internal:7897}
+      https_proxy: ${OUTBOUND_PROXY:-http://host.docker.internal:7897}
+      all_proxy:   ${OUTBOUND_PROXY:-http://host.docker.internal:7897}
+      no_proxy:    localhost,127.0.0.1,postgres,redis,cursor2api
+
+      # Allow private IPs so we can register cursor2api (http://cursor2api:3000) later
+      SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS: "true"
+      SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP: "true"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  postgres:
+    image: postgres:18-alpine
+    container_name: sub2api-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sub2api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-sub2api}
+      # postgres:18-alpine changed default layout; pin PGDATA to keep legacy path
+      PGDATA: /var/lib/postgresql/data
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sub2api} -d ${POSTGRES_DB:-sub2api}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:8-alpine
+    container_name: sub2api-redis
+    restart: unless-stopped
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server --save 60 1 --appendonly yes --appendfsync everysec --requirepass "$$REDIS_PASSWORD"
+        else
+          exec redis-server --save 60 1 --appendonly yes --appendfsync everysec
+        fi
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-}
+    volumes:
+      - ./redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

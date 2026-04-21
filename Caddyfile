@@ -1,0 +1,51 @@
+# proxy-api / CloudCodeAPI Caddy reverse proxy
+# -----------------------------------------------------------------------------
+# Auto-TLS via Let's Encrypt. Caddy reads DOMAIN from the env.
+# -----------------------------------------------------------------------------
+
+{
+	# Sensible defaults for a small/private deployment.
+	servers {
+		# Prefer HTTP/2 + HTTP/3
+		protocols h1 h2 h2c h3
+	}
+}
+
+{$DOMAIN} {
+	# Reverse proxy everything to sub2api inside the docker network.
+	reverse_proxy sub2api:8080 {
+		# Pass through original client IP / proto so sub2api logs them right.
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+
+		# sub2api uses underscored headers (e.g. some custom session ones);
+		# Caddy preserves them by default, no extra config needed.
+
+		# Health/keepalive tuning
+		transport http {
+			read_timeout 10m
+			write_timeout 10m
+			keepalive 30s
+		}
+	}
+
+	# Compress text payloads
+	encode gzip zstd
+
+	# Hide Caddy server header
+	header {
+		-Server
+		# Some basic security headers (tame, won't break embed flows)
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+
+	# Caddy access log → stdout
+	log {
+		output stdout
+		format console
+		level INFO
+	}
+}

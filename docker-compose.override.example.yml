@@ -1,0 +1,16 @@
+# Copy to docker-compose.override.yml when wiring cursor2api in Phase 1.
+# Docker Compose merges override.yml automatically.
+# -----------------------------------------------------------------------------
+# NOTE: cursor2api image tag and env-var schema must be verified during Task 23
+# (Milestone D). The image reference below is a placeholder pending that check.
+# -----------------------------------------------------------------------------
+
+services:
+  cursor2api:
+    image: ghcr.io/7836246/cursor2api:latest   # TODO: verify in Milestone D Task 23
+    container_name: cursor2api
+    restart: unless-stopped
+    environment:
+      CURSOR_TOKEN: ${CURSOR_TOKEN:?CURSOR_TOKEN must be set in .env to enable cursor2api}
+      API_KEY: ${CURSOR2API_KEY:?CURSOR2API_KEY must be set in .env}
+    # No host port exposed — sub2api reaches it via the docker network at http://cursor2api:3000
