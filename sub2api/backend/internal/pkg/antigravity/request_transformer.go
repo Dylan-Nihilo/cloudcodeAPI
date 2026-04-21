@@ -365,7 +365,7 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, too
 			role = "model"
 		}
 
-		parts, strippedThisMsg, err := buildParts(msg.Content, toolIDToName, toolIDSanitizer, allowDummyThought)
+		parts, strippedThisMsg, err := buildPartsWithIDSanitizer(msg.Content, toolIDToName, toolIDSanitizer, allowDummyThought)
 		if err != nil {
 			return nil, false, fmt.Errorf("build parts for message %d: %w", i, err)
 		}
