@@ -150,6 +150,45 @@ func TestBuildParts_ToolUseSignatureHandling(t *testing.T) {
 	})
 }
 
+func TestBuildParts_SanitizesToolUseIDsAndKeepsToolResultAligned(t *testing.T) {
+	content := `[
+		{"type":"tool_use","id":"call:abc/中文(1)","name":"Bash","input":{"command":"ls"}},
+		{"type":"tool_result","tool_use_id":"call:abc/中文(1)","content":"ok","is_error":false}
+	]`
+
+	toolIDToName := make(map[string]string)
+	sanitizer := newToolIDSanitizer()
+	parts, _, err := buildPartsWithIDSanitizer(json.RawMessage(content), toolIDToName, sanitizer, false)
+	require.NoError(t, err)
+	require.Len(t, parts, 2)
+	require.NotNil(t, parts[0].FunctionCall)
+	require.NotNil(t, parts[1].FunctionResponse)
+
+	gotCallID := parts[0].FunctionCall.ID
+	gotResultID := parts[1].FunctionResponse.ID
+	require.Equal(t, gotCallID, gotResultID)
+	require.Equal(t, "call_abc_1", gotCallID)
+	require.Equal(t, "Bash", toolIDToName[gotCallID])
+}
+
+func TestBuildParts_SanitizedToolIDsStayUniqueOnCollision(t *testing.T) {
+	content := `[
+		{"type":"tool_use","id":"call:a.b","name":"First","input":{}},
+		{"type":"tool_use","id":"call:a/b","name":"Second","input":{}}
+	]`
+
+	toolIDToName := make(map[string]string)
+	sanitizer := newToolIDSanitizer()
+	parts, _, err := buildPartsWithIDSanitizer(json.RawMessage(content), toolIDToName, sanitizer, false)
+	require.NoError(t, err)
+	require.Len(t, parts, 2)
+	require.NotNil(t, parts[0].FunctionCall)
+	require.NotNil(t, parts[1].FunctionCall)
+	require.NotEqual(t, parts[0].FunctionCall.ID, parts[1].FunctionCall.ID)
+	require.Equal(t, "First", toolIDToName[parts[0].FunctionCall.ID])
+	require.Equal(t, "Second", toolIDToName[parts[1].FunctionCall.ID])
+}
+
 // TestBuildTools_CustomTypeTools 测试custom类型工具转换
 func TestBuildTools_CustomTypeTools(t *testing.T) {
 	tests := []struct {

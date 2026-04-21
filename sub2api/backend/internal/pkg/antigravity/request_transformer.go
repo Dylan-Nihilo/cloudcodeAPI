@@ -87,6 +87,7 @@ func TransformClaudeToGemini(claudeReq *ClaudeRequest, projectID, mappedModel st
 func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, mappedModel string, opts TransformOptions) ([]byte, error) {
 	// 用于存储 tool_use id -> name 映射
 	toolIDToName := make(map[string]string)
+	toolIDSanitizer := newToolIDSanitizer()
 
 	// 检测是否有 web_search 工具
 	hasWebSearchTool := hasWebSearchTool(claudeReq.Tools)
@@ -107,7 +108,7 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	allowDummyThought := strings.HasPrefix(targetModel, "gemini-")
 
 	// 1. 构建 contents
-	contents, strippedThinking, err := buildContents(claudeReq.Messages, toolIDToName, isThinkingEnabled, allowDummyThought)
+	contents, strippedThinking, err := buildContents(claudeReq.Messages, toolIDToName, toolIDSanitizer, isThinkingEnabled, allowDummyThought)
 	if err != nil {
 		return nil, fmt.Errorf("build contents: %w", err)
 	}
@@ -354,7 +355,7 @@ func buildSystemInstruction(system json.RawMessage, modelName string, opts Trans
 }
 
 // buildContents 构建 contents
-func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isThinkingEnabled, allowDummyThought bool) ([]GeminiContent, bool, error) {
+func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, toolIDSanitizer *toolIDSanitizer, isThinkingEnabled, allowDummyThought bool) ([]GeminiContent, bool, error) {
 	var contents []GeminiContent
 	strippedThinking := false
 
@@ -364,7 +365,7 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 			role = "model"
 		}
 
-		parts, strippedThisMsg, err := buildParts(msg.Content, toolIDToName, allowDummyThought)
+		parts, strippedThisMsg, err := buildParts(msg.Content, toolIDToName, toolIDSanitizer, allowDummyThought)
 		if err != nil {
 			return nil, false, fmt.Errorf("build parts for message %d: %w", i, err)
 		}
@@ -414,6 +415,10 @@ const DummyThoughtSignature = "skip_thought_signature_validator"
 // buildParts 构建消息的 parts
 // allowDummyThought: 只有 Gemini 模型支持 dummy thought signature
 func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDummyThought bool) ([]GeminiPart, bool, error) {
+	return buildPartsWithIDSanitizer(content, toolIDToName, newToolIDSanitizer(), allowDummyThought)
+}
+
+func buildPartsWithIDSanitizer(content json.RawMessage, toolIDToName map[string]string, toolIDSanitizer *toolIDSanitizer, allowDummyThought bool) ([]GeminiPart, bool, error) {
 	var parts []GeminiPart
 	strippedThinking := false
 
@@ -473,16 +478,21 @@ func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDu
 			}
 
 		case "tool_use":
+			sanitizedToolID := toolIDSanitizer.Normalize(block.ID, block.Name)
+
 			// 存储 id -> name 映射
 			if block.ID != "" && block.Name != "" {
 				toolIDToName[block.ID] = block.Name
+			}
+			if sanitizedToolID != "" && block.Name != "" {
+				toolIDToName[sanitizedToolID] = block.Name
 			}
 
 			part := GeminiPart{
 				FunctionCall: &GeminiFunctionCall{
 					Name: block.Name,
 					Args: block.Input,
-					ID:   block.ID,
+					ID:   sanitizedToolID,
 				},
 			}
 			// tool_use 的 signature 处理：
@@ -496,13 +506,17 @@ func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDu
 			parts = append(parts, part)
 
 		case "tool_result":
+			sanitizedToolUseID := toolIDSanitizer.Normalize(block.ToolUseID, block.Name)
+
 			// 获取函数名
 			funcName := block.Name
 			if funcName == "" {
 				if name, ok := toolIDToName[block.ToolUseID]; ok {
 					funcName = name
+				} else if name, ok := toolIDToName[sanitizedToolUseID]; ok {
+					funcName = name
 				} else {
-					funcName = block.ToolUseID
+					funcName = sanitizedToolUseID
 				}
 			}
 
@@ -515,13 +529,87 @@ func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDu
 					Response: map[string]any{
 						"result": resultContent,
 					},
-					ID: block.ToolUseID,
+					ID: sanitizedToolUseID,
 				},
 			})
 		}
 	}
 
 	return parts, strippedThinking, nil
+}
+
+type toolIDSanitizer struct {
+	originalToSanitized map[string]string
+	usedSanitized       map[string]string
+}
+
+func newToolIDSanitizer() *toolIDSanitizer {
+	return &toolIDSanitizer{
+		originalToSanitized: make(map[string]string),
+		usedSanitized:       make(map[string]string),
+	}
+}
+
+func (s *toolIDSanitizer) Normalize(rawID, fallback string) string {
+	if s == nil {
+		s = newToolIDSanitizer()
+	}
+
+	trimmed := strings.TrimSpace(rawID)
+	cacheKey := trimmed
+	if cacheKey == "" {
+		cacheKey = "__fallback__:" + strings.TrimSpace(fallback)
+	}
+	if existing, ok := s.originalToSanitized[cacheKey]; ok {
+		return existing
+	}
+
+	baseSource := trimmed
+	if baseSource == "" {
+		baseSource = strings.TrimSpace(fallback)
+	}
+
+	sanitized := sanitizeToolID(baseSource)
+	if sanitized == "" {
+		sanitized = "tool_" + shortToolIDHash(baseSource)
+	}
+
+	if usedBy, ok := s.usedSanitized[sanitized]; ok && usedBy != cacheKey {
+		sanitized = sanitized + "_" + shortToolIDHash(cacheKey)
+	}
+
+	s.originalToSanitized[cacheKey] = sanitized
+	s.usedSanitized[sanitized] = cacheKey
+	return sanitized
+}
+
+func sanitizeToolID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range raw {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-':
+			b.WriteRune(r)
+			lastUnderscore = false
+		default:
+			if !lastUnderscore && b.Len() > 0 {
+				b.WriteByte('_')
+				lastUnderscore = true
+			}
+		}
+	}
+
+	return strings.Trim(b.String(), "_-")
+}
+
+func shortToolIDHash(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return fmt.Sprintf("%x", sum[:4])
 }
 
 // parseToolResultContent 解析 tool_result 的 content
